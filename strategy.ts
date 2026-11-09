@@ -156,8 +156,23 @@ export const DEFAULT_PARAMS: Params = {
 };
 
 const LAMPORTS = 1e9;
-const CURVE_FEE = 0.0125;
+const BPS = 10_000n;
+const CURVE_FEE_BPS = 125n;
 const BPS_PER_UNIT = 10_000;
+
+/** Mark a token holding at current curve reserves, net of curve and transaction fees. */
+export function markedExitValueLamports(
+  tokenAmount: bigint,
+  virtualQuoteReserves: bigint,
+  virtualTokenReserves: bigint,
+  txFeeLamports: bigint,
+): bigint {
+  if (tokenAmount <= 0n || virtualQuoteReserves <= 0n) return -txFeeLamports;
+  const tokenReserve = virtualTokenReserves > 0n ? virtualTokenReserves : 0n;
+  const grossQuoteLamports = tokenAmount * virtualQuoteReserves / (tokenReserve + tokenAmount);
+  const afterCurveFee = grossQuoteLamports * (BPS - CURVE_FEE_BPS) / BPS;
+  return afterCurveFee - txFeeLamports;
+}
 
 interface Trade {
   slot: number;
@@ -331,8 +346,12 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const mark = marks.get(mint);
         const vq = mark ? BigInt(mark.virtual_quote_reserves) : curve.virtual_quote_reserves;
         const vt = mark ? BigInt(mark.virtual_token_reserves) : curve.virtual_token_reserves;
-        const grossValue = pos.token_amount * vq / (vt + pos.token_amount);
-        const netValue = grossValue * 9_875n / 10_000n - BigInt(state.txFeeLamports());
+        const netValue = markedExitValueLamports(
+          pos.token_amount,
+          vq,
+          vt,
+          state.txFeeLamports(),
+        );
         equitySol += Math.max(0, Number(netValue) / LAMPORTS);
       }
       if (peakEquitySol === null) {
@@ -358,11 +377,10 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         h.filled = true;
         if (curve === undefined || curve.complete) continue;
         const mk = marks.get(mint);
-        const vq = mk ? Number(mk.virtual_quote_reserves) : Number(curve.virtual_quote_reserves);
-        const vt = mk ? Number(mk.virtual_token_reserves) : Number(curve.virtual_token_reserves);
+        const vq = BigInt(mk ? mk.virtual_quote_reserves : curve.virtual_quote_reserves);
+        const vt = BigInt(mk ? mk.virtual_token_reserves : curve.virtual_token_reserves);
         const rqSol = (mk ? Number(mk.real_quote_reserves) : Number(curve.real_quote_reserves)) / LAMPORTS;
-        const tokens = Number(pos.token_amount);
-        const value = ((tokens * vq) / (vt + tokens) / LAMPORTS) * (1 - CURVE_FEE) - tx;
+        const value = Number(markedExitValueLamports(pos.token_amount, vq, vt, state.txFeeLamports())) / LAMPORTS;
         const cost = Number(pos.cost_lamports) / LAMPORTS;
         if (value > h.peakValue) h.peakValue = value;
         h.lastValue = value;
